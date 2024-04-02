@@ -12,7 +12,5 @@ env_logger = { version = "0.11.3" }
 clap = { version = "4.5.4", features = ["derive", "env"] }
 ssh2 = "0.9"
 ssh2-config = "0.2"
-async-ssh2-lite = { version = "0.4", features = ["tokio"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 dirs = "5.0"
 futures = "0.3"

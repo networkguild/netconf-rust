@@ -1,6 +1,6 @@
 use crate::error::{Error, Result};
 use memmem::{Searcher, TwoWaySearcher};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use std::io::{Read, Write};
 
 const NETCONF_1_0_TERMINATOR: &str = "]]>]]>";
 const NETCONF_1_1_TERMINATOR: &str = "##";
@@ -24,68 +24,80 @@ impl Framer {
         self.upgraded = true;
     }
 
-    pub(crate) async fn read_xml<R>(&mut self, mut from: R) -> Result<String>
+    pub(crate) fn read_xml<R>(&mut self, mut from: R) -> Result<String>
     where
-        R: AsyncRead + Unpin,
+        R: Read,
     {
         if self.upgraded {
             loop {
-                let chunk_size: u32 = self.read_header(&mut from).await?;
+                let chunk_size: u32 = self.read_header(&mut from)?;
                 if chunk_size == 0 {
                     break;
                 }
                 let mut buffer = vec![0u8; chunk_size as usize];
-                from.read(&mut buffer).await?;
+                from.read(&mut buffer)?;
                 self.read_buffer.extend(&buffer);
             }
-            let response = String::from_utf8(self.read_buffer.to_vec()).unwrap();
+            let response = String::from_utf8_lossy(&self.read_buffer).to_string();
             self.read_buffer.drain(..);
             Ok(response)
         } else {
             let mut buffer = [0u8; 128];
             let search = TwoWaySearcher::new(NETCONF_1_0_TERMINATOR.as_bytes());
             while search.search_in(&self.read_buffer).is_none() {
-                let bytes = from.read(&mut buffer).await?;
+                let bytes = from.read(&mut buffer)?;
                 self.read_buffer.extend(&buffer[..bytes]);
             }
             let pos = search.search_in(&self.read_buffer).unwrap();
-            let resp = String::from_utf8(self.read_buffer[..pos].to_vec()).unwrap();
+            let resp = String::from_utf8_lossy(&self.read_buffer[..pos]).to_string();
             self.read_buffer.drain(0..(pos + 6));
             Ok(resp.trim().to_string())
         }
     }
 
-    pub(crate) async fn write_xml<T>(&mut self, data: &str, mut to: T) -> Result<()>
+    pub(crate) fn write_xml<T>(&mut self, rpc: &str, mut to: T) -> Result<()>
     where
-        T: AsyncWrite + Unpin,
+        T: Write,
     {
-        let data = data.trim();
         if self.upgraded {
-            let data =
-                format!("\n#{}\n{}\n{}\n", data.len(), data, NETCONF_1_1_TERMINATOR).into_bytes();
-            to.write_all(&data).await?;
+            write!(
+                to,
+                "\n#{}\n{}\n{}\n",
+                rpc.len(),
+                rpc,
+                NETCONF_1_1_TERMINATOR
+            )?;
         } else {
-            let data = format!("{}{}", data.trim(), NETCONF_1_0_TERMINATOR).into_bytes();
-            to.write_all(&data).await?;
+            write!(to, "{}{}", rpc, NETCONF_1_0_TERMINATOR)?;
         }
         Ok(())
     }
 
-    async fn read_header<R>(&mut self, mut from: R) -> Result<u32>
+    fn read_header<R>(&mut self, mut from: R) -> Result<u32>
     where
-        R: AsyncRead + Unpin,
+        R: Read,
     {
         let mut buffer = [0u8; 2];
-        from.read_exact(&mut buffer).await?;
-        if buffer[0] != b'\n' || buffer[1] != b'#' {
-            return Err(Error::MalformedChunk);
+        from.read_exact(&mut buffer)?;
+        if buffer[0] != b'\n' {
+            return Err(Error::MalformedChunk {
+                expected: '\n',
+                actual: buffer[0].into(),
+            });
+        }
+
+        if buffer[1] != b'#' {
+            return Err(Error::MalformedChunk {
+                expected: '#',
+                actual: buffer[1].into(),
+            });
         }
 
         let mut chunk_size: u32 = 0;
         let mut last_read: u8;
         loop {
             let mut buffer = [0u8; 1];
-            from.read_exact(&mut buffer).await?;
+            from.read_exact(&mut buffer)?;
             last_read = buffer[0];
             if last_read == b'#' {
                 continue;
@@ -94,7 +106,10 @@ impl Framer {
                 return Ok(chunk_size);
             }
             if last_read < b'0' || last_read > b'9' {
-                return Err(Error::MalformedChunk);
+                return Err(Error::MalformedChunk {
+                    expected: '0',
+                    actual: last_read.into(),
+                });
             }
             chunk_size = chunk_size * 10 + u32::from(last_read - b'0');
         }
@@ -107,8 +122,8 @@ mod tests {
     use pretty_assertions::assert_eq;
     use std::io::Cursor;
 
-    #[tokio::test]
-    async fn test_chunked_framer() {
+    #[test]
+    fn test_chunked_framer() {
         let mut framer = Framer::new();
         framer.upgrade();
 
@@ -196,9 +211,8 @@ mod tests {
 
 "#
         .to_string();
-        let channel = Cursor::new(rpc_error.into_bytes());
-        let (read, _) = tokio::io::split(channel);
-        let resp = framer.read_xml(read).await.unwrap();
+        let channel = Cursor::new(rpc_error);
+        let resp = framer.read_xml(channel).unwrap();
         let expected = r#"
 <?xml version="1.0" encoding="UTF-8"?>
 <rpc-reply message-id="8ddd59e5-96fc-4a55-a75f-a3fae2d9f712" xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
@@ -218,8 +232,8 @@ mod tests {
         assert_eq!(resp, expected.trim());
     }
 
-    #[tokio::test]
-    async fn test_eof_framer() {
+    #[test]
+    fn test_eof_framer() {
         let mut framer = Framer::new();
         let rpc_error = r#"
 <?xml version="1.0" encoding="UTF-8"?>
@@ -238,9 +252,8 @@ mod tests {
 </rpc-reply>
 ]]>]]>"#
             .to_string();
-        let channel = Cursor::new(rpc_error.into_bytes());
-        let (read, _) = tokio::io::split(channel);
-        let resp = framer.read_xml(read).await.unwrap();
+        let channel = Cursor::new(rpc_error);
+        let resp = framer.read_xml(channel).unwrap();
         let expected = r#"
 <?xml version="1.0" encoding="UTF-8"?>
 <rpc-reply message-id="8ddd59e5-96fc-4a55-a75f-a3fae2d9f712" xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">

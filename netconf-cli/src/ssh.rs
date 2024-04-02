@@ -1,7 +1,6 @@
 use crate::Commands;
-use async_ssh2_lite::{AsyncSession, SessionConfiguration, TokioTcpStream};
 use dirs::home_dir;
-use ssh2::MethodType;
+use ssh2::{MethodType, Session};
 use ssh2_config::{HostParams, ParseRule, SshConfig};
 use std::fs::File;
 use std::io;
@@ -51,10 +50,7 @@ impl Host {
         format!("{}:{}", self.address, self.port)
     }
 
-    pub(crate) async fn connect(
-        &mut self,
-        params: &HostParams,
-    ) -> Result<AsyncSession<TokioTcpStream>, io::Error> {
+    pub(crate) fn connect(&mut self, params: &HostParams) -> Result<Session, io::Error> {
         let address = match params.host_name.as_deref() {
             Some(host) => {
                 self.address = host.to_string();
@@ -66,7 +62,7 @@ impl Host {
         let address = format!("{}:{}", address, port);
 
         let socket_addresses: Vec<SocketAddr> = address.to_socket_addrs()?.collect();
-        let mut tcp: Option<TokioTcpStream> = None;
+        let mut tcp: Option<TcpStream> = None;
         for socket_addr in socket_addresses.iter() {
             log::debug!(target: &self.address(), "Trying to establish connection to {}", socket_addr);
             match TcpStream::connect_timeout(
@@ -74,10 +70,8 @@ impl Host {
                 params.connect_timeout.unwrap_or(Duration::from_secs(10)),
             ) {
                 Ok(stream) => {
-                    stream.set_nonblocking(true)?;
                     log::info!(target: &self.address(), "Established connection to {}", socket_addr);
-                    let tokio_stream = TokioTcpStream::from_std(stream)?;
-                    tcp = Some(tokio_stream);
+                    tcp = Some(stream);
                     break;
                 }
                 Err(err) => {
@@ -91,7 +85,7 @@ impl Host {
                 }
             }
         }
-        let stream: TokioTcpStream = match tcp {
+        let stream: TcpStream = match tcp {
             Some(t) => t,
             None => {
                 return Err(io::Error::new(
@@ -100,20 +94,12 @@ impl Host {
                 ));
             }
         };
-        let mut configuration = SessionConfiguration::new();
-        configuration.set_timeout(10_000);
-        if let Some(compress) = params.compression {
-            log::debug!(target: &self.address(), "Setting compression: {}", compress);
-            configuration.set_compress(compress);
-        }
-        if params.tcp_keep_alive.unwrap_or(false) && params.server_alive_interval.is_some() {
-            let interval = params.server_alive_interval.unwrap().as_secs() as u32;
-            log::debug!(target: &self.address(), "Setting keepalive interval: {} seconds", interval);
-            configuration.set_keepalive(true, interval);
-        }
-        let mut session = AsyncSession::new(stream, configuration)?;
-        configure_session(&mut session, params).await?;
-        session.handshake().await?;
+
+        let mut session = Session::new()?;
+        configure_session(&mut session, params)?;
+        session.set_timeout(10_000);
+        session.set_tcp_stream(stream);
+        session.handshake()?;
 
         if params.identity_file.is_none() {
             let username = match params.user.as_ref() {
@@ -124,13 +110,12 @@ impl Host {
                 None => self.username.clone().unwrap(),
             };
             session
-                .userauth_password(username.as_str(), self.password.clone().unwrap().as_str())
-                .await?;
+                .userauth_password(username.as_str(), self.password.clone().unwrap().as_str())?;
             Ok(session)
         } else {
             let mut agent = session.agent().unwrap();
-            agent.connect().await.unwrap();
-            agent.list_identities().await.unwrap();
+            agent.connect().unwrap();
+            agent.list_identities().unwrap();
 
             let user = params.user.as_deref().unwrap();
             for identity in agent.identities().unwrap() {
@@ -139,7 +124,7 @@ impl Host {
                     "Trying authentication with public key '{}'",
                     identity.comment()
                 );
-                match agent.userauth(user, &identity).await {
+                match agent.userauth(user, &identity) {
                     Ok(_) => break,
                     Err(err) => {
                         log::warn!(
@@ -193,44 +178,28 @@ pub(crate) fn read_config() -> Option<SshConfig> {
     }
 }
 
-async fn configure_session(
-    session: &mut AsyncSession<TokioTcpStream>,
-    params: &HostParams,
-) -> Result<(), io::Error> {
+fn configure_session(session: &mut Session, params: &HostParams) -> Result<(), io::Error> {
+    if let Some(compress) = params.compression {
+        log::debug!("Setting compression: {}", compress);
+        session.set_compress(compress);
+    }
+    if params.tcp_keep_alive.unwrap_or(false) && params.server_alive_interval.is_some() {
+        let interval = params.server_alive_interval.unwrap().as_secs() as u32;
+        log::debug!("Setting keepalive interval: {} seconds", interval);
+        session.set_keepalive(true, interval);
+    }
     if let Some(algos) = params.kex_algorithms.as_deref() {
-        session
-            .method_pref(MethodType::Kex, algos.join(",").as_str())
-            .await?;
+        session.method_pref(MethodType::Kex, algos.join(",").as_str())?;
     }
     if let Some(algos) = params.host_key_algorithms.as_deref() {
-        if let Err(err) = session
-            .method_pref(MethodType::HostKey, algos.join(",").as_str())
-            .await
-        {
-            panic!("Could not set host key algorithms: {}", err);
-        }
-        session
-            .method_pref(MethodType::HostKey, algos.join(",").as_str())
-            .await?;
+        session.method_pref(MethodType::HostKey, algos.join(",").as_str())?;
     }
     if let Some(algos) = params.ciphers.as_deref() {
-        session
-            .method_pref(MethodType::CryptCs, algos.join(",").as_str())
-            .await?;
+        session.method_pref(MethodType::CryptCs, algos.join(",").as_str())?;
     }
     if let Some(algos) = params.mac.as_deref() {
-        if let Err(err) = session
-            .method_pref(MethodType::MacCs, algos.join(",").as_str())
-            .await
-        {
-            panic!("Could not set MAC algorithms (client-server): {}", err);
-        }
-        session
-            .method_pref(MethodType::MacCs, algos.join(",").as_str())
-            .await?;
-        session
-            .method_pref(MethodType::MacSc, algos.join(",").as_str())
-            .await?;
+        session.method_pref(MethodType::MacCs, algos.join(",").as_str())?;
+        session.method_pref(MethodType::MacSc, algos.join(",").as_str())?;
     }
     Ok(())
 }

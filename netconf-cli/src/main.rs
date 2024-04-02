@@ -1,12 +1,11 @@
 use clap::{Args, Parser, Subcommand};
 use env_logger::{Builder, Env, Target};
-use futures::stream::FuturesUnordered;
-use futures::StreamExt;
 use netconf_rust::error::Result;
 use netconf_rust::Connection;
 use ssh::Host;
 use ssh2_config::HostParams;
 use std::env;
+use std::thread;
 use std::time::Instant;
 
 mod ssh;
@@ -82,8 +81,7 @@ fn init_logging() {
     builder.init();
 }
 
-#[tokio::main]
-async fn main() {
+fn main() {
     let cli = Cli::parse();
     if cli.debug {
         env::set_var("NETCONF_LOG", "debug");
@@ -95,7 +93,6 @@ async fn main() {
 
     let config = ssh::read_config();
     let mut hosts = Vec::new();
-    let mut tasks = FuturesUnordered::new();
     for address in cli.host.iter() {
         let command = match &cli.command {
             Commands::GetConfig(args) => Commands::GetConfig(args.clone()),
@@ -110,60 +107,58 @@ async fn main() {
         ));
     }
 
+    let mut handles = vec![];
     for mut host in hosts.into_iter() {
         let params = match &config {
             Some(p) => p.query(host.address()),
             None => HostParams::default(),
         };
-        let task = tokio::spawn(async move {
-            let start_time = Instant::now();
-            match host.connect(&params).await {
-                Ok(session) => {
-                    let ssh = netconf_rust::transport::ssh::SSHTransport::dial_session(session)
-                        .await
-                        .unwrap();
-                    log::info!(target: &host.address(), "Connected to host");
-                    let mut connection = Connection::new(ssh).await.unwrap();
-                    log::debug!(
-                        target: &host.address(),
-                        "Started Netconf session with session-id: {}",
-                        connection.session_id()
-                    );
-                    match &host.command {
-                        Commands::GetConfig(args) => {
-                            run_get_config(&host.address(), args, &mut connection)
-                                .await
-                                .unwrap();
-                        }
-                        Commands::Get(args) => {
-                            run_get(&host.address(), args, &mut connection)
-                                .await
-                                .unwrap();
-                        }
-                        Commands::EditConfig(_args) => {
-                            log::warn!("Edit-config not implemented yet");
-                        }
-                    };
-                }
-                Err(err) => {
-                    log::error!(target: &host.address(), "Could not connect to host, error: {err}");
-                }
+
+        let start_time = Instant::now();
+        let task = thread::spawn(move || match host.connect(&params) {
+            Ok(session) => {
+                let ssh =
+                    netconf_rust::transport::ssh::SSHTransport::dial_session(session).unwrap();
+                log::info!(target: &host.address(), "Connected to host");
+                let mut connection = Connection::new(ssh).unwrap();
+                log::debug!(
+                    target: &host.address(),
+                    "Started Netconf session with session-id: {}",
+                    connection.session_id()
+                );
+
+                match &host.command {
+                    Commands::GetConfig(args) => {
+                        run_get_config(&host.address(), args, &mut connection).unwrap();
+                    }
+                    Commands::Get(args) => {
+                        run_get(&host.address(), args, &mut connection).unwrap();
+                    }
+                    Commands::EditConfig(_args) => {
+                        log::warn!("Edit-config not implemented yet");
+                    }
+                };
+                log::info!(target: &host.address(), "Operation took: {:.3}s", start_time.elapsed().as_secs_f32());
             }
-            log::info!(target: &host.address(), "Operation took: {:.3}s", start_time.elapsed().as_secs_f32());
+            Err(err) => {
+                log::error!(target: &host.address(), "Could not connect to host, error: {err}");
+            }
         });
-        tasks.push(task);
+        handles.push(task);
     }
 
-    while let Some(task) = tasks.next().await {
-        match task {
-            Ok(_) => log::info!("Task completed successfully"),
-            Err(err) => log::error!("Task failed: {}", err),
-        }
+    for i in handles {
+        match i.join() {
+            Ok(_) => {}
+            Err(err) => {
+                log::error!("Task error: {:?}", err);
+            }
+        };
     }
 }
 
-async fn run_get(address: &str, args: &GetConfigArgs, connection: &mut Connection) -> Result<()> {
-    match connection.get_config(&args.source).await {
+fn run_get(address: &str, args: &GetConfigArgs, connection: &mut Connection) -> Result<()> {
+    match connection.get_config(&args.source) {
         Ok(resp) => {
             log::info!("Get rpc success");
             log::trace!(target: address, "Response:\n{}", resp.trim());
@@ -172,16 +167,12 @@ async fn run_get(address: &str, args: &GetConfigArgs, connection: &mut Connectio
             log::error!(target: address, "Get error: {}", err);
         }
     };
-    connection.close_session().await.unwrap();
+    connection.close_session().unwrap();
     Ok(())
 }
 
-async fn run_get_config(
-    address: &str,
-    args: &GetConfigArgs,
-    connection: &mut Connection,
-) -> Result<()> {
-    match connection.get_config(&args.source).await {
+fn run_get_config(address: &str, args: &GetConfigArgs, connection: &mut Connection) -> Result<()> {
+    match connection.get_config(&args.source) {
         Ok(resp) => {
             log::info!("Get-config rpc success");
             log::trace!(target: address, "Response:\n{}", resp.trim());
@@ -190,6 +181,6 @@ async fn run_get_config(
             log::error!(target: address, "Get-config error: {}", err);
         }
     };
-    connection.close_session().await.unwrap();
+    connection.close_session().unwrap();
     Ok(())
 }

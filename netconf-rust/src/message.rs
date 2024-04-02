@@ -51,9 +51,8 @@ impl Hello {
 
 impl Display for Hello {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mut buffer = String::new();
-        let mut ser = Serializer::new(&mut buffer);
-        ser.indent(' ', 2);
+        let mut buffer = String::with_capacity(206);
+        let ser = Serializer::new(&mut buffer);
         self.serialize(ser).unwrap();
         write!(f, "{}", buffer)
     }
@@ -87,9 +86,8 @@ impl Rpc {
 
 impl Display for Rpc {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mut buffer = String::new();
-        let mut ser = Serializer::new(&mut buffer);
-        ser.indent(' ', 2);
+        let mut buffer = String::with_capacity(256);
+        let ser = Serializer::new(&mut buffer);
         self.serialize(ser).unwrap();
         write!(f, "{}", buffer)
     }
@@ -180,8 +178,7 @@ impl RpcReply {
 impl Display for RpcReply {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut buffer = String::new();
-        let mut ser = Serializer::new(&mut buffer);
-        ser.indent(' ', 2);
+        let ser = Serializer::new(&mut buffer);
         self.serialize(ser).unwrap();
         write!(f, "{}", buffer)
     }

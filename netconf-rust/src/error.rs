@@ -8,7 +8,9 @@ pub enum Error {
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error(transparent)]
-    Ssh(#[from] async_ssh2_lite::Error),
+    Ssh(#[from] ssh2::Error),
+    #[error(transparent)]
+    SerializingFailure(#[from] quick_xml::DeError),
     #[error("remote procedure call failed:\n{0}")]
     Netconf(#[from] message::RpcReply),
     #[error("unknown datastore {}, (expected {:?})", unknown, expected)]
@@ -16,6 +18,10 @@ pub enum Error {
         expected: Vec<String>,
         unknown: String,
     },
-    #[error("malformed message chunk")]
-    MalformedChunk,
+    #[error(
+        "malformed message chunk (expected {:?}, actual {:?})",
+        expected,
+        actual
+    )]
+    MalformedChunk { expected: char, actual: char },
 }

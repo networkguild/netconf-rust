@@ -3,11 +3,6 @@ name = "netconf-rust"
 version = "0.1.0"
 edition = "2021"
 
-[features]
-default = ["blocking"]
-blocking = ["ssh2"]
-async = ["async-ssh2-lite", "async-trait", "tokio"]
-
 [dependencies]
 memmem = "0.1"
 uuid = { version = "1.8", features = ["v4", "fast-rng"] }
@@ -16,17 +11,7 @@ serde = "1.0"
 serde_derive = "1.0"
 thiserror = "1"
 log = { version = "0.4.21", features = ["std"] }
-ssh2 = { version = "0.9", default-features = false, optional = true }
-async-ssh2-lite = { version = "0.4", features = ["tokio"], optional = true }
-tokio = { version = "1", default-features = false, features = [
-    "net",
-    "time",
-    "rt",
-    "io-util",
-], optional = true }
-async-trait = { version = "0.1.79", optional = true }
+ssh2 = { version = "0.9" }
 
 [dev-dependencies]
 pretty_assertions = "1.4"
-async-std = "1.12"
-tokio = { version = "1", features = ["macros"] }
